@@ -122,3 +122,9 @@ cargo test
 ```
 
 Unit tests cover allowlist checks, settings clamps, cache expiry and invalidation, path traversal, mail-list parsing, token redaction, and the immediate-versus-batch dedupe. Integration tests drive the tools with a fake CLI and speak stdio JSON-RPC to the binary, including a hung CLI that must be killed. GitHub Actions runs `cargo test` on every push.
+
+## License
+
+Protbot is open source software under the [MIT License](LICENSE).
+
+The creator is not responsible for any issues you might have with it. You use this software at your own risk.
