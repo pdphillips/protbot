@@ -1,0 +1,19 @@
+# Protbot settings. No secrets belong in this file.
+# Values below the clamp floor are raised when the file is read.
+# poll_interval_secs: 30..=86400 (default 300)
+# summary_cadence_secs: 300..=604800 (default 3600)
+# settings_reload_secs: 30..=3600 (default 180)
+
+poll_interval_secs = 300
+summary_cadence_secs = 3600
+settings_reload_secs = 180
+
+# Exact addresses, or @domain. Mail from these senders is pushed at once.
+sender_allowlist = []
+
+# Case-insensitive subject/summary match. A hit is pushed at once.
+importance_keywords = []
+
+# Proton Pass item refs (vault/item) whose note or url is an https ICS feed.
+# Not the feed URL itself.
+calendar_feeds = []
