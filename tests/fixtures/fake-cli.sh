@@ -1,5 +1,5 @@
 #!/bin/sh
-# Test double for proton-mail, pass-cli, proton-drive, and curl.
+# Test double for pass-cli, proton-drive, and curl. Mail uses Bridge, not this script.
 set -eu
 
 if [ "${PROTBOT_FAKE_SLEEP:-}" = "1" ]; then

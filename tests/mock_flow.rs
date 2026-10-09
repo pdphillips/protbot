@@ -30,8 +30,9 @@ async fn send_requires_writes_and_allowlist() {
     let mock = runner();
     let mut cfg = Config::for_test(std::path::Path::new("/tmp"));
     cfg.recipients = AllowList::parse_csv("friend@example.com").unwrap();
+    let running = app(cfg, mock.clone());
     let denied = call_tool(
-        &app(cfg, mock.clone()),
+        &running,
         "mail_send",
         json!({"to":["friend@example.com"],"subject":"Hi","body":"secret-body"}),
     )
@@ -39,13 +40,15 @@ async fn send_requires_writes_and_allowlist() {
     assert!(denied.is_error);
     assert!(denied.text.contains("ALLOW_WRITES"));
     assert!(mock.calls().is_empty());
+    assert!(running.recording().unwrap().sends().is_empty());
 
     let mock = runner();
     let mut cfg = Config::for_test(std::path::Path::new("/tmp"));
     cfg.allow_writes = true;
     cfg.recipients = AllowList::parse_csv("friend@example.com").unwrap();
+    let running = app(cfg, mock.clone());
     let blocked = call_tool(
-        &app(cfg, mock.clone()),
+        &running,
         "mail_send",
         json!({"to":["other@example.com"],"subject":"Hi","body":"secret-body"}),
     )
@@ -53,25 +56,22 @@ async fn send_requires_writes_and_allowlist() {
     assert!(blocked.is_error);
     assert!(blocked.text.contains("not allowlisted"));
     assert!(mock.calls().is_empty());
+    assert!(running.recording().unwrap().sends().is_empty());
 
     let mock = runner();
     let mut cfg = Config::for_test(std::path::Path::new("/tmp"));
     cfg.allow_writes = true;
     cfg.recipients = AllowList::parse_csv("friend@example.com").unwrap();
+    let running = app(cfg, mock.clone());
     let sent = call_tool(
-        &app(cfg, mock.clone()),
+        &running,
         "mail_send",
         json!({"to":["Friend@Example.com"],"subject":"Hi","body":"secret-body"}),
     )
     .await;
     assert!(!sent.is_error, "{}", sent.text);
-    let calls = mock.calls();
-    assert_eq!(calls.len(), 1);
-    assert!(calls[0].args.iter().any(|arg| arg == "--body"));
-    assert!(calls[0].args.iter().any(|arg| arg == "-"));
-    assert!(!calls[0].args.iter().any(|arg| arg.contains("secret-body")));
-    assert_eq!(calls[0].stdin_data, b"secret-body");
-    assert!(!calls[0].secret_in_args);
+    assert!(mock.calls().is_empty());
+    assert_eq!(running.recording().unwrap().sends(), vec!["secret-body".to_string()]);
 }
 
 #[tokio::test]
@@ -88,12 +88,8 @@ async fn list_cache_invalidates_on_write() {
     assert!(!trashed.is_error, "{}", trashed.text);
     let third = call_tool(&app, "mail_list", json!({})).await;
     assert!(!third.is_error);
-    let lists = mock
-        .calls()
-        .into_iter()
-        .filter(|call| call.args.iter().any(|arg| arg == "list"))
-        .count();
-    assert_eq!(lists, 2);
+    assert_eq!(app.recording().unwrap().list_calls(), 2);
+    assert!(mock.calls().is_empty());
 }
 
 #[tokio::test]

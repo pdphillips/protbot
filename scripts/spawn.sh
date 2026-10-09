@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Inject the Proton Pass agent token into the environment, then exec protbot.
-# The token is never written to disk, never placed in argv, and never echoed.
+# Read the Pass agent token and the Bridge IMAP password from the local pass
+# store, export them for this process only, then exec protbot.
+# Neither value is written to disk, placed in argv, or echoed.
 set -euo pipefail
 
 if [[ $# -ne 0 ]]; then
@@ -8,19 +9,33 @@ if [[ $# -ne 0 ]]; then
     exit 2
 fi
 
-if [[ -z "${PROTON_PASS_AGENT_TOKEN:-}" ]]; then
-    name="${PROTBOT_TOKEN_PASS_NAME:-protbot/agent-token}"
+read_pass() {
+    local name="$1"
+    local value
     if ! command -v pass >/dev/null 2>&1; then
-        echo "protbot: pass is not installed and PROTON_PASS_AGENT_TOKEN is unset" >&2
+        echo "protbot: pass is not installed. Store ${name} and start again. Protbot will not prompt." >&2
         exit 1
     fi
-    token="$(pass show "$name" | head -n 1 || true)"
-    if [[ -z "${token}" ]]; then
-        echo "protbot: empty token from pass name ${name}" >&2
+    # pinentry-mode=error and a closed stdin: a missing entry or a locked key fails.
+    # This process does not ask for a passphrase.
+    value="$(PASSWORD_STORE_GPG_OPTS="--batch --pinentry-mode error" pass show "$name" </dev/null 2>/dev/null | head -n 1 || true)"
+    if [[ -z "${value}" ]]; then
+        echo "protbot: pass entry ${name} is missing. Sign Proton Mail Bridge in on this machine, store protbot/agent-token and protbot/bridge-password, then start again. Protbot will not prompt." >&2
         exit 1
     fi
+    printf '%s' "${value}"
+}
+
+if [[ -z "${PROTON_PASS_AGENT_TOKEN:-}" ]]; then
+    token="$(read_pass "${PROTBOT_TOKEN_PASS_NAME:-protbot/agent-token}")"
     export PROTON_PASS_AGENT_TOKEN="${token}"
     unset token
+fi
+
+if [[ -z "${PROTON_BRIDGE_PASSWORD:-}" ]]; then
+    bridge_password="$(read_pass "${PROTBOT_BRIDGE_PASS_NAME:-protbot/bridge-password}")"
+    export PROTON_BRIDGE_PASSWORD="${bridge_password}"
+    unset bridge_password
 fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

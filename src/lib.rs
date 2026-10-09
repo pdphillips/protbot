@@ -1,4 +1,5 @@
 mod app;
+mod bridge;
 mod cache;
 mod calendar;
 mod cli;
@@ -11,6 +12,7 @@ mod tools;
 mod watcher;
 
 pub use app::{App, Config};
+pub use bridge::{check_loopback, RecordingMailer};
 pub use cli::{CallRecord, CliError, CliOutput, MapRunner};
 pub use policy::AllowList;
 pub use settings::Settings;
@@ -26,6 +28,9 @@ pub fn run() -> Result<(), String> {
 
 async fn run_async() -> Result<(), String> {
     let app = App::from_env()?;
+    if !app.cfg().skip_bridge_probe {
+        app.probe_bridge().await?;
+    }
     let notices = if app.cfg().disable_watcher {
         None
     } else {

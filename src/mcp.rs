@@ -142,7 +142,7 @@ async fn handle(app: &App, message: &Value, ready: &mut bool, min_rank: &mut u8)
                 "protocolVersion": version,
                 "capabilities": { "tools": {}, "logging": {} },
                 "serverInfo": { "name": "protbot", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Protbot reads the bot's own Proton account through proton-mail, pass-cli, proton-drive, and ICS feeds. Writes need ALLOW_WRITES=true. Sends only go to the recipient allowlist. Do not expect secrets in logs."
+                "instructions": "Protbot reads the bot's own Proton account through Proton Mail Bridge on loopback, pass-cli, proton-drive, and ICS feeds. Writes need ALLOW_WRITES=true. Sends only go to the recipient allowlist. Do not expect secrets in logs."
             })))
         }
         "ping" => Some(result_line(id, json!({}))),

@@ -1,3 +1,4 @@
+use crate::bridge::{missing_secret, BridgeMailer, Mailer, RecordingMailer};
 use crate::cache::TtlCache;
 use crate::cli::Runner;
 use crate::policy::AllowList;
@@ -14,7 +15,12 @@ pub struct Config {
     token: Option<String>,
     pub allow_writes: bool,
     pub recipients: AllowList,
-    pub mail_bin: String,
+    pub bridge_host: String,
+    pub imap_port: u16,
+    pub smtp_port: u16,
+    pub bridge_user: String,
+    pub bridge_password_present: bool,
+    pub skip_bridge_probe: bool,
     pub pass_bin: String,
     pub drive_bin: String,
     pub curl_bin: String,
@@ -33,6 +39,9 @@ impl std::fmt::Debug for Config {
             .debug_struct("Config")
             .field("token_present", &self.token.is_some())
             .field("allow_writes", &self.allow_writes)
+            .field("bridge_host", &self.bridge_host)
+            .field("bridge_user", &self.bridge_user)
+            .field("bridge_password_present", &self.bridge_password_present)
             .field("recipient_count", &self.recipients.as_strings().len())
             .field("calendar_feed_count", &self.calendar_ics.len())
             .field("disable_watcher", &self.disable_watcher)
@@ -65,7 +74,12 @@ impl Config {
             token: Some("pst_test::fixture".into()),
             allow_writes: false,
             recipients: AllowList::default(),
-            mail_bin: "proton-mail".into(),
+            bridge_host: "127.0.0.1".into(),
+            imap_port: 1143,
+            smtp_port: 1025,
+            bridge_user: "bot@proton.me".into(),
+            bridge_password_present: true,
+            skip_bridge_probe: true,
             pass_bin: "pass-cli".into(),
             drive_bin: "proton-drive".into(),
             curl_bin: "curl".into(),
@@ -79,14 +93,29 @@ impl Config {
         }
     }
 
-    pub fn from_env() -> Result<Self, String> {
+    pub(crate) fn load_env() -> Result<Built, String> {
         if std::env::args().len() > 1 {
             return Err("this program takes no arguments".into());
         }
         let token = std::env::var("PROTON_PASS_AGENT_TOKEN")
             .ok()
             .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| missing_secret("PROTON_PASS_AGENT_TOKEN", "protbot/agent-token"))?;
+        let bridge_password = std::env::var("PROTON_BRIDGE_PASSWORD")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| missing_secret("PROTON_BRIDGE_PASSWORD", "protbot/bridge-password"))?;
+        let bridge_user = crate::policy::normalize_email(&env_or("PROTBOT_BRIDGE_USER", ""))
+            .map_err(|_| {
+                "PROTBOT_BRIDGE_USER is unset or not the mailbox address Bridge shows. Protbot will not prompt."
+                    .to_string()
+            })?;
+        let bridge_host = env_or("PROTBOT_BRIDGE_HOST", "127.0.0.1");
+        crate::bridge::check_loopback(&bridge_host)?;
+        let imap_port = env_port("PROTBOT_IMAP_PORT", 1143)?;
+        let smtp_port = env_port("PROTBOT_SMTP_PORT", 1025)?;
         let recipients = AllowList::parse_csv(
             &std::env::var("PROTBOT_RECIPIENT_ALLOWLIST").unwrap_or_default(),
         )?;
@@ -103,11 +132,25 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|_| default_settings_path());
         let session_dir = session_dir()?;
-        Ok(Self {
-            token,
+        let bridge = BridgeMailer::new(
+            bridge_host.clone(),
+            imap_port,
+            smtp_port,
+            bridge_user.clone(),
+            bridge_password,
+            Duration::from_secs(env_u64("PROTBOT_TOOL_TIMEOUT_SECS", 30, 5, 120)),
+        )?;
+        Ok(Built {
+            cfg: Self {
+            token: Some(token),
             allow_writes: env_flag("ALLOW_WRITES"),
             recipients,
-            mail_bin: env_or("PROTBOT_MAIL_BIN", "proton-mail"),
+            bridge_host,
+            imap_port,
+            smtp_port,
+            bridge_user,
+            bridge_password_present: true,
+            skip_bridge_probe: env_off("PROTBOT_BRIDGE_PROBE"),
             pass_bin: env_or("PROTBOT_PASS_BIN", "pass-cli"),
             drive_bin: env_or("PROTBOT_DRIVE_BIN", "proton-drive"),
             curl_bin: env_or("PROTBOT_CURL_BIN", "curl"),
@@ -118,8 +161,15 @@ impl Config {
             calendar_ics,
             session_dir,
             disable_watcher: env_flag("PROTBOT_DISABLE_WATCHER"),
+            },
+            bridge,
         })
     }
+}
+
+pub(crate) struct Built {
+    cfg: Config,
+    bridge: BridgeMailer,
 }
 
 fn env_or(name: &str, default: &str) -> String {
@@ -127,6 +177,24 @@ fn env_or(name: &str, default: &str) -> String {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| default.to_string())
+}
+
+fn env_off(name: &str) -> bool {
+    matches!(
+        std::env::var(name).unwrap_or_default().trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no"
+    )
+}
+
+fn env_port(name: &str, default: u16) -> Result<u16, String> {
+    match std::env::var(name) {
+        Err(_) => Ok(default),
+        Ok(value) if value.trim().is_empty() => Ok(default),
+        Ok(value) => value
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| format!("{name} is invalid")),
+    }
 }
 
 fn env_flag(name: &str) -> bool {
@@ -174,6 +242,7 @@ struct Inner {
     settings: SettingsStore,
     cache: Mutex<TtlCache>,
     runner: Arc<dyn Runner>,
+    mail: Mailer,
     cli_lock: tokio::sync::Mutex<()>,
     pass_ready: Mutex<bool>,
     notices: Mutex<VecDeque<Notice>>,
@@ -186,22 +255,33 @@ pub struct App {
 
 impl App {
     pub fn from_env() -> Result<Self, String> {
-        let cfg = Config::from_env()?;
-        let settings = SettingsStore::open(cfg.settings_path.clone())?;
-        Ok(Self::new(cfg, settings, Arc::new(crate::cli::ProcessRunner)))
+        let built = Config::load_env()?;
+        let settings = SettingsStore::open(built.cfg.settings_path.clone())?;
+        Ok(Self::new(
+            built.cfg,
+            settings,
+            Arc::new(crate::cli::ProcessRunner),
+            Mailer::Bridge(built.bridge),
+        ))
     }
 
     pub fn for_test(cfg: Config, settings: Settings, runner: Arc<dyn Runner>) -> Self {
-        Self::new(cfg, SettingsStore::memory(settings), runner)
+        Self::new(
+            cfg,
+            SettingsStore::memory(settings),
+            runner,
+            Mailer::Record(RecordingMailer::default()),
+        )
     }
 
-    fn new(cfg: Config, settings: SettingsStore, runner: Arc<dyn Runner>) -> Self {
+    fn new(cfg: Config, settings: SettingsStore, runner: Arc<dyn Runner>, mail: Mailer) -> Self {
         Self {
             inner: Arc::new(Inner {
                 cfg,
                 settings,
                 cache: Mutex::new(TtlCache::new(Duration::from_secs(30))),
                 runner,
+                mail,
                 cli_lock: tokio::sync::Mutex::new(()),
                 pass_ready: Mutex::new(false),
                 notices: Mutex::new(VecDeque::new()),
@@ -219,6 +299,21 @@ impl App {
 
     pub fn runner(&self) -> &dyn Runner {
         self.inner.runner.as_ref()
+    }
+
+    pub fn mail(&self) -> &Mailer {
+        &self.inner.mail
+    }
+
+    pub fn recording(&self) -> Option<RecordingMailer> {
+        self.inner.mail.recording()
+    }
+
+    pub async fn probe_bridge(&self) -> Result<(), String> {
+        match &self.inner.mail {
+            Mailer::Bridge(mail) => mail.probe().await,
+            Mailer::Record(_) => Ok(()),
+        }
     }
 
     pub fn cli_lock(&self) -> &tokio::sync::Mutex<()> {

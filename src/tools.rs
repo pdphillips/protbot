@@ -1,4 +1,5 @@
 use crate::app::App;
+use crate::bridge::Outbound;
 use crate::calendar::{parse_ics, validate_ics_url};
 use crate::cli::{CliError, CliOutput, CommandSpec};
 use crate::mail::{self, MailHeader};
@@ -101,7 +102,7 @@ async fn dispatch(app: &App, name: &str, arguments: Value) -> Result<String, Str
 pub fn tool_defs() -> Vec<Value> {
     let empty = obj(json!({}), &[]);
     vec![
-        tool("mail_list", "List mail headers in one proton-mail call. Cached for 30 seconds.", obj(json!({"folder": {"type": "string"}, "unread_only": {"type": "boolean"}}), &[])),
+        tool("mail_list", "List mail headers through Proton Mail Bridge. Cached for 30 seconds.", obj(json!({"folder": {"type": "string"}, "unread_only": {"type": "boolean"}}), &[])),
         tool("mail_read", "Read one message. The body is returned to the caller and is not logged.", obj(json!({"id": {"type": "string"}}), &["id"])),
         tool("mail_send", "Send mail. Requires ALLOW_WRITES=true and an allowlisted recipient.", obj(json!({"to": {"type": "array", "items": {"type": "string"}}, "cc": {"type": "array", "items": {"type": "string"}}, "bcc": {"type": "array", "items": {"type": "string"}}, "subject": {"type": "string"}, "body": {"type": "string"}}), &["to", "subject", "body"])),
         tool("mail_trash", "Move a message to trash. Requires ALLOW_WRITES=true.", obj(json!({"id": {"type": "string"}}), &["id"])),
@@ -123,7 +124,7 @@ pub fn tool_defs() -> Vec<Value> {
         tool("calendar_events", "Read ICS feeds configured in settings or PROTBOT_CALENDAR_ICS. Feed URLs are not logged.", empty.clone()),
         tool("settings_get", "Show the clamped settings and whether writes are enabled.", empty.clone()),
         tool("settings_update", "Update settings.toml. Intervals are clamped.", obj(json!({"poll_interval_secs": {"type": "integer"}, "summary_cadence_secs": {"type": "integer"}, "settings_reload_secs": {"type": "integer"}, "sender_allowlist": {"type": "array", "items": {"type": "string"}}, "importance_keywords": {"type": "array", "items": {"type": "string"}}, "calendar_feeds": {"type": "array", "items": {"type": "string"}}}), &[])),
-        tool("whoami", "Show the proton-mail account the CLI session belongs to.", empty),
+        tool("whoami", "Show the mailbox address signed in to Proton Mail Bridge.", empty),
     ]
 }
 
@@ -163,24 +164,19 @@ async fn list_headers(app: &App, folder: &str, unread_only: bool) -> Result<Vec<
     mail::check_folder(folder)?;
     let key = format!("mail:list:{folder}:{unread_only}");
     if let Some(hit) = app.cache_get(&key) {
-        return mail::parse_message_list(&hit);
+        return serde_json::from_str(&hit).map_err(|_| "cached mail list was not json".to_string());
     }
-    let mut args = vec![
-        "--json".into(),
-        "messages".into(),
-        "list".into(),
-        "--folder".into(),
-        folder.into(),
-        "--page-size".into(),
-        "200".into(),
-    ];
-    if unread_only {
-        args.push("--unread".into());
+    let headers = timed(app, app.mail().list(folder, unread_only)).await?;
+    if let Ok(stored) = serde_json::to_string(&headers) {
+        app.cache_insert(&key, stored);
     }
-    let out = run_cli(app, &app.cfg().mail_bin, args, Vec::new(), None).await?;
-    let headers = mail::parse_message_list(&out.stdout)?;
-    app.cache_insert(&key, out.stdout);
     Ok(headers)
+}
+
+async fn timed<T>(app: &App, fut: impl std::future::Future<Output = Result<T, String>>) -> Result<T, String> {
+    tokio::time::timeout(app.cfg().tool_timeout, fut)
+        .await
+        .map_err(|_| "bridge timed out".to_string())?
 }
 
 async fn mail_list(app: &App, arguments: &Value) -> Result<String, String> {
@@ -225,15 +221,7 @@ async fn mail_read(app: &App, arguments: &Value) -> Result<String, String> {
     }
     let input: Input = parse(arguments)?;
     require_id(&input.id)?;
-    let out = run_cli(
-        app,
-        &app.cfg().mail_bin,
-        vec!["--json".into(), "messages".into(), "read".into(), input.id, "--format".into(), "text".into()],
-        Vec::new(),
-        None,
-    )
-    .await?;
-    Ok(out.stdout)
+    timed(app, app.mail().read(&input.id)).await
 }
 
 async fn mail_send(app: &App, arguments: &Value) -> Result<String, String> {
@@ -267,27 +255,17 @@ async fn mail_send(app: &App, arguments: &Value) -> Result<String, String> {
         }
         recipients.push(email);
     }
+    let message = Outbound {
+        to: input.to.iter().map(|addr| normalize_email(addr)).collect::<Result<Vec<_>, _>>()?,
+        cc: input.cc.iter().map(|addr| normalize_email(addr)).collect::<Result<Vec<_>, _>>()?,
+        bcc: input.bcc.iter().map(|addr| normalize_email(addr)).collect::<Result<Vec<_>, _>>()?,
+        subject: input.subject,
+        body: input.body,
+    };
     let _ = recipients;
-    let mut args = vec!["--json".into(), "messages".into(), "send".into()];
-    push_addrs(&mut args, "--to", &input.to)?;
-    push_addrs(&mut args, "--cc", &input.cc)?;
-    push_addrs(&mut args, "--bcc", &input.bcc)?;
-    args.push("--subject".into());
-    args.push(input.subject);
-    args.push("--body".into());
-    args.push("-".into());
-    let out = run_cli(app, &app.cfg().mail_bin, args, input.body.into_bytes(), None).await?;
+    let out = timed(app, app.mail().send(&message)).await?;
     app.cache_invalidate();
-    Ok(out.stdout)
-}
-
-fn push_addrs(args: &mut Vec<String>, flag: &str, addrs: &[String]) -> Result<(), String> {
-    for addr in addrs {
-        let email = normalize_email(addr)?;
-        args.push(flag.into());
-        args.push(email);
-    }
-    Ok(())
+    Ok(out)
 }
 
 async fn mail_mutate(app: &App, arguments: &Value, verb: &str) -> Result<String, String> {
@@ -299,16 +277,13 @@ async fn mail_mutate(app: &App, arguments: &Value, verb: &str) -> Result<String,
     let input: Input = parse(arguments)?;
     require_writes(app)?;
     require_id(&input.id)?;
-    let out = run_cli(
-        app,
-        &app.cfg().mail_bin,
-        vec!["--json".into(), "messages".into(), verb.into(), input.id],
-        Vec::new(),
-        None,
-    )
-    .await?;
+    let out = if verb == "delete" {
+        timed(app, app.mail().delete(&input.id)).await?
+    } else {
+        timed(app, app.mail().trash(&input.id)).await?
+    };
     app.cache_invalidate();
-    Ok(out.stdout)
+    Ok(out)
 }
 
 async fn mail_move(app: &App, arguments: &Value) -> Result<String, String> {
@@ -322,16 +297,9 @@ async fn mail_move(app: &App, arguments: &Value) -> Result<String, String> {
     require_writes(app)?;
     require_id(&input.id)?;
     mail::check_folder(&input.dest)?;
-    let out = run_cli(
-        app,
-        &app.cfg().mail_bin,
-        vec!["--json".into(), "messages".into(), "move".into(), input.id, "--dest".into(), input.dest],
-        Vec::new(),
-        None,
-    )
-    .await?;
+    let out = timed(app, app.mail().move_msg(&input.id, &input.dest)).await?;
     app.cache_invalidate();
-    Ok(out.stdout)
+    Ok(out)
 }
 
 async fn mail_folders(app: &App) -> Result<String, String> {
@@ -339,17 +307,10 @@ async fn mail_folders(app: &App) -> Result<String, String> {
     if let Some(hit) = app.cache_get(KEY) {
         return Ok(hit);
     }
-    let out = run_cli(
-        app,
-        &app.cfg().mail_bin,
-        vec!["--json".into(), "folders".into(), "list".into()],
-        Vec::new(),
-        None,
-    )
-    .await?;
-    serde_json::from_str::<Value>(&out.stdout).map_err(|_| "folder list was not json".to_string())?;
-    app.cache_insert(KEY, out.stdout.clone());
-    Ok(out.stdout)
+    let out = timed(app, app.mail().folders()).await?;
+    serde_json::from_str::<Value>(&out).map_err(|_| "folder list was not json".to_string())?;
+    app.cache_insert(KEY, out.clone());
+    Ok(out)
 }
 
 fn mail_notifications(app: &App, arguments: &Value) -> Result<String, String> {
@@ -556,7 +517,10 @@ async fn ensure_pass(app: &App) -> Result<(), String> {
         }),
     )
     .await;
-    if info.is_err() {
+    if let Err(err) = info {
+        if err.contains("timed out") {
+            return Err(err);
+        }
         run_cli(
             app,
             &app.cfg().pass_bin,
@@ -814,6 +778,7 @@ fn settings_get(app: &App) -> Result<String, String> {
         "writes_enabled": app.cfg().allow_writes,
         "recipient_allowlist": app.cfg().recipients.as_strings(),
         "pass_token_present": app.cfg().token().is_some(),
+        "bridge_password_present": app.cfg().bridge_password_present,
     })).unwrap_or_else(|_| "{}".into()))
 }
 
@@ -824,8 +789,7 @@ fn settings_update(app: &App, arguments: &Value) -> Result<String, String> {
 }
 
 async fn whoami(app: &App) -> Result<String, String> {
-    let out = run_cli(app, &app.cfg().mail_bin, vec!["--json".into(), "whoami".into()], Vec::new(), None).await?;
-    Ok(out.stdout)
+    timed(app, app.mail().whoami()).await
 }
 
 fn require_writes(app: &App) -> Result<(), String> {

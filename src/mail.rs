@@ -1,7 +1,11 @@
-use crate::policy::{one_line, valid_folder, valid_item_id};
+use crate::policy::valid_folder;
+use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use crate::policy::{one_line, valid_item_id};
+#[cfg(test)]
 use serde_json::Value;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MailHeader {
     pub id: String,
     pub from: String,
@@ -10,6 +14,7 @@ pub struct MailHeader {
     pub unread: bool,
 }
 
+#[cfg(test)]
 pub fn parse_message_list(text: &str) -> Result<Vec<MailHeader>, String> {
     let value: Value = serde_json::from_str(text).map_err(|_| "mail list was not json".to_string())?;
     let items: Vec<Value> = if let Some(items) = value.as_array() {
@@ -45,6 +50,7 @@ pub fn parse_message_list(text: &str) -> Result<Vec<MailHeader>, String> {
     Ok(out)
 }
 
+#[cfg(test)]
 fn sender(item: &Value) -> String {
     if let Some(value) = first_str(item, &["from_address", "fromAddress", "senderAddress"]) {
         return value.to_ascii_lowercase();
@@ -59,6 +65,7 @@ fn sender(item: &Value) -> String {
         .to_ascii_lowercase()
 }
 
+#[cfg(test)]
 fn first_str(item: &Value, keys: &[&str]) -> Option<String> {
     for key in keys {
         if let Some(value) = item.get(*key).and_then(Value::as_str) {
@@ -71,6 +78,7 @@ fn first_str(item: &Value, keys: &[&str]) -> Option<String> {
     None
 }
 
+#[cfg(test)]
 fn flag(item: &Value, keys: &[&str]) -> bool {
     for key in keys {
         match item.get(*key) {

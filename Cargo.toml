@@ -9,7 +9,9 @@ description = "Stdio MCP server for one Proton account, with no secrets on disk"
 [dependencies]
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
-tokio = { version = "=1.53.2", features = ["fs", "io-std", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "=1.53.2", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+rustls = { version = "=0.23.31", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "=0.26.2", default-features = false, features = ["ring", "tls12"] }
 toml = "=0.8.23"
 
 [dev-dependencies]

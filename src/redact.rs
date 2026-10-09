@@ -22,6 +22,7 @@ fn secret_span(bytes: &[u8], i: usize) -> Option<usize> {
         b"PROTON_PASS_PERSONAL_ACCESS_TOKEN=",
         b"PROTON_PASS_PASSWORD=",
         b"PROTON_PASS_TOTP=",
+        b"PROTON_BRIDGE_PASSWORD=",
     ];
     for key in KEYS {
         if bytes[i..].starts_with(key) {

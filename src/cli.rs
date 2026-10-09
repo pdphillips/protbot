@@ -87,6 +87,7 @@ fn secret_env_key(key: &str) -> bool {
             | "PROTON_PASS_AGENT_REASON"
             | "PROTON_PASS_PASSWORD"
             | "PROTON_PASS_TOTP"
+            | "PROTON_BRIDGE_PASSWORD"
             | "PROTBOT_CALENDAR_ICS"
     )
 }
@@ -132,6 +133,7 @@ async fn run_process(spec: CommandSpec) -> Result<CliOutput, CliError> {
         .take()
         .ok_or_else(|| CliError::Message("missing stderr".into()))?;
     let pid = child.id();
+    let mut group = GroupKill { pid };
     let joined = timeout(spec.timeout, async move {
         let status_fut = child.wait();
         let out_fut = read_capped(&mut stdout);
@@ -148,12 +150,11 @@ async fn run_process(spec: CommandSpec) -> Result<CliOutput, CliError> {
             });
         }
         Err(_) => {
-            if let Some(pid) = pid {
-                kill_group(pid);
-            }
+            drop(group);
             return Err(CliError::Timeout { bin: spec.bin });
         }
     };
+    group.disarm();
     let stdout = String::from_utf8_lossy(&stdout).to_string();
     let stderr = redact(&String::from_utf8_lossy(&stderr));
     let code = status.code().unwrap_or(1);
@@ -181,6 +182,24 @@ async fn read_capped(reader: &mut (impl AsyncReadExt + Unpin)) -> Vec<u8> {
         }
     }
     buf
+}
+
+struct GroupKill {
+    pid: Option<u32>,
+}
+
+impl GroupKill {
+    fn disarm(&mut self) {
+        self.pid = None;
+    }
+}
+
+impl Drop for GroupKill {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid.take() {
+            kill_group(pid);
+        }
+    }
 }
 
 fn kill_group(pid: u32) {
