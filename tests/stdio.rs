@@ -159,9 +159,14 @@ fn stdio_lists_mail_and_pass_without_leaking_the_token() {
     let vaults = server.recv();
     assert!(vaults.contains("v1"), "{vaults}");
     assert!(!vaults.contains("NOTREAL"));
+    server.send(r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"drive_list","arguments":{"path":"/my-files"}}}"#);
+    let listed = server.recv();
+    assert!(listed.contains("notes.txt"), "{listed}");
     drop(server);
     let logged = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(logged.contains("vault"), "{logged}");
+    assert!(logged.contains("filesystem list --json /my-files"), "{logged}");
+    assert!(!logged.contains("--json filesystem"), "{logged}");
     assert!(!logged.contains("NOTREAL"), "{logged}");
     assert!(!logged.contains("bridge-fixture"), "{logged}");
     assert!(!logged.contains("pst_stdio_fixture"), "{logged}");

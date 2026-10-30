@@ -559,14 +559,7 @@ async fn drive_list(app: &App, arguments: &Value) -> Result<String, String> {
     if let Some(hit) = app.cache_get(&key) {
         return Ok(hit);
     }
-    let out = run_cli(
-        app,
-        &app.cfg().drive_bin,
-        vec!["--json".into(), "filesystem".into(), "list".into(), path.clone()],
-        Vec::new(),
-        None,
-    )
-    .await?;
+    let out = run_drive_json(app, "list", &path).await?;
     serde_json::from_str::<Value>(&out.stdout).map_err(|_| "drive list was not json".to_string())?;
     app.cache_insert(&key, out.stdout.clone());
     Ok(out.stdout)
@@ -578,14 +571,7 @@ async fn drive_info(app: &App, arguments: &Value) -> Result<String, String> {
     if let Some(hit) = app.cache_get(&key) {
         return Ok(hit);
     }
-    let out = run_cli(
-        app,
-        &app.cfg().drive_bin,
-        vec!["--json".into(), "filesystem".into(), "info".into(), path.clone()],
-        Vec::new(),
-        None,
-    )
-    .await?;
+    let out = run_drive_json(app, "info", &path).await?;
     app.cache_insert(&key, out.stdout.clone());
     Ok(out.stdout)
 }
@@ -824,6 +810,43 @@ fn parse<T: for<'de> Deserialize<'de>>(arguments: &Value) -> Result<T, String> {
     serde_json::from_value(arguments.clone()).map_err(|_| "invalid arguments".to_string())
 }
 
+/// Arguments for a read-only `proton-drive filesystem <sub> <path>` call with JSON output.
+///
+/// proton-drive 0.9.0+ only accepts `-j/--json` after the subcommand; older
+/// releases took it before the command. `legacy` selects the old order.
+fn drive_json_args(sub: &str, path: &str, legacy: bool) -> Vec<String> {
+    if legacy {
+        vec!["--json".into(), "filesystem".into(), sub.into(), path.into()]
+    } else {
+        vec!["filesystem".into(), sub.into(), "--json".into(), path.into()]
+    }
+}
+
+/// Runs a read-only drive JSON command. Tries the order that last worked (the
+/// current order by default); if the CLI exits non-zero, retries once with the
+/// other order and remembers it when that succeeds. Only used for `list` and
+/// `info`, which have no side effects, so a retry is always safe. If both
+/// orders fail, the first error is returned. Timeouts and spawn errors are not
+/// retried.
+async fn run_drive_json(app: &App, sub: &str, path: &str) -> Result<CliOutput, String> {
+    let bin = &app.cfg().drive_bin;
+    let legacy = app.drive_json_legacy();
+    match run_cli_raw(app, bin, drive_json_args(sub, path, legacy), Vec::new(), None).await {
+        Ok(out) => Ok(out),
+        Err(first @ CliError::Exit { .. }) => {
+            let retry = drive_json_args(sub, path, !legacy);
+            match run_cli_raw(app, bin, retry, Vec::new(), None).await {
+                Ok(out) => {
+                    app.set_drive_json_legacy(!legacy);
+                    Ok(out)
+                }
+                Err(_) => Err(cli_error_text(first)),
+            }
+        }
+        Err(other) => Err(cli_error_text(other)),
+    }
+}
+
 async fn run_cli(
     app: &App,
     bin: &str,
@@ -831,6 +854,32 @@ async fn run_cli(
     stdin_data: Vec<u8>,
     pass: Option<PassEnv>,
 ) -> Result<CliOutput, String> {
+    run_cli_raw(app, bin, args, stdin_data, pass)
+        .await
+        .map_err(cli_error_text)
+}
+
+fn cli_error_text(err: CliError) -> String {
+    match err {
+        CliError::Exit { bin, code, stderr } => {
+            let stderr = public_error(&stderr);
+            if stderr.is_empty() {
+                format!("{bin} exited {code}")
+            } else {
+                stderr
+            }
+        }
+        other => public_error(&other.to_string()),
+    }
+}
+
+async fn run_cli_raw(
+    app: &App,
+    bin: &str,
+    args: Vec<String>,
+    stdin_data: Vec<u8>,
+    pass: Option<PassEnv>,
+) -> Result<CliOutput, CliError> {
     let _guard = app.cli_lock().lock().await;
     let mut env_overrides = Vec::new();
     if let Some(pass) = pass {
@@ -848,15 +897,5 @@ async fn run_cli(
         scrub_secrets: true,
         timeout: app.cfg().tool_timeout,
     };
-    app.runner().run(spec).await.map_err(|err| match err {
-        CliError::Exit { bin, code, stderr } => {
-            let stderr = public_error(&stderr);
-            if stderr.is_empty() {
-                format!("{bin} exited {code}")
-            } else {
-                stderr
-            }
-        }
-        other => public_error(&other.to_string()),
-    })
+    app.runner().run(spec).await
 }

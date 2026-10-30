@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -244,6 +245,7 @@ struct Inner {
     runner: Arc<dyn Runner>,
     mail: Mailer,
     cli_lock: tokio::sync::Mutex<()>,
+    drive_json_legacy: AtomicBool,
     pass_ready: Mutex<bool>,
     notices: Mutex<VecDeque<Notice>>,
 }
@@ -283,6 +285,7 @@ impl App {
                 runner,
                 mail,
                 cli_lock: tokio::sync::Mutex::new(()),
+                drive_json_legacy: AtomicBool::new(false),
                 pass_ready: Mutex::new(false),
                 notices: Mutex::new(VecDeque::new()),
             }),
@@ -318,6 +321,15 @@ impl App {
 
     pub fn cli_lock(&self) -> &tokio::sync::Mutex<()> {
         &self.inner.cli_lock
+    }
+
+    /// True once proton-drive has been seen to need the pre-0.9.0 `--json` order.
+    pub fn drive_json_legacy(&self) -> bool {
+        self.inner.drive_json_legacy.load(Ordering::Relaxed)
+    }
+
+    pub fn set_drive_json_legacy(&self, legacy: bool) {
+        self.inner.drive_json_legacy.store(legacy, Ordering::Relaxed);
     }
 
     pub fn pass_ready(&self) -> bool {
