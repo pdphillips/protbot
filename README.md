@@ -108,7 +108,7 @@ Pass, Drive, and calendar still shell out. Binaries default to `pass-cli`, `prot
 
 Pass uses `vault list`, `item list`, `item view`, `item create login --from-template -`, `item delete`, and `item totp`, with `--output json`. The agent token and reason are environment variables.
 
-Drive uses `filesystem list|info|upload|download|trash`. `--json` is passed for list and info.
+Drive uses `filesystem list|info|upload|download|trash`. List and info pass `--json` after the subcommand (`filesystem list --json PATH`), which proton-drive 0.9.0+ requires. If that exits non-zero, protbot retries once with the pre-0.9.0 order (`--json filesystem list PATH`) and keeps using whichever order worked for the rest of the process.
 
 Calendar feeds are fetched with `curl --config -` so the URL is on stdin, and only `https://` URLs are accepted.
 

@@ -40,6 +40,18 @@ if [ -n "${PROTBOT_FAKE_LOG:-}" ]; then
     printf '%s\n' "$*" >> "$PROTBOT_FAKE_LOG"
 fi
 
+# proton-drive 0.9.0: -j/--json must follow the subcommand.
+if [ "$first" = "--json" ] && [ "${2:-}" = "filesystem" ]; then
+    echo "Command not found: --json filesystem" >&2
+    exit 1
+fi
+if [ "$first" = "filesystem" ] && [ "${3:-}" = "--json" ]; then
+    case "${2:-}" in
+        list) printf '%s\n' '[{"name":"notes.txt","type":"file"}]'; exit 0 ;;
+        info) printf '%s\n' '{"name":"notes.txt","type":"file"}'; exit 0 ;;
+    esac
+fi
+
 if [ "$first" = "--json" ]; then
     shift
 fi
