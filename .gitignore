@@ -2,3 +2,5 @@
 /dist
 **/*.toml.tmp
 /.verify/
+**/__pycache__/
+*.pyc
